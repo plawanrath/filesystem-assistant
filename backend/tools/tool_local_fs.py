@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os, shutil, fnmatch
 from pathlib import Path
-from fastmcp import FastMCP, tool
+from fastmcp import FastMCP
 
 ROOT = Path.home()   # limit ops to user home for safety
 mcp = FastMCP("LocalFS")
@@ -12,13 +12,13 @@ def _abs(p:str) -> Path:
         raise ValueError("Access outside home disallowed")
     return pth
 
-@tool()
+@mcp.tool()
 def list_directory(path:str="~") -> list[str]:
     """Return names in directory."""
     p=_abs(path)
     return os.listdir(p)
 
-@tool()
+@mcp.tool()
 def search_files(query:str, path:str="~") -> list[str]:
     """Recursively search by filename glob."""
     base=_abs(path)
@@ -28,23 +28,23 @@ def search_files(query:str, path:str="~") -> list[str]:
         if len(hits)>100: break
     return hits
 
-@tool()
+@mcp.tool()
 def rename_file(old_path:str, new_name:str) -> str:
     p=_abs(old_path); dest=p.with_name(new_name)
     os.rename(p, dest)
     return f"renamed to {dest}"
 
-@tool()
+@mcp.tool()
 def move_file(src:str, dest:str) -> str:
     shutil.move(_abs(src), _abs(dest))
     return "moved"
 
-@tool()
+@mcp.tool()
 def copy_file(src:str, dest:str) -> str:
     shutil.copy2(_abs(src), _abs(dest))
     return "copied"
 
-@tool()
+@mcp.tool()
 def delete_file(path:str) -> str:
     p=_abs(path)
     if p.is_dir(): shutil.rmtree(p)

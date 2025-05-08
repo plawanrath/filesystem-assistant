@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os, shutil, fnmatch
 from pathlib import Path
-from fastmcp import FastMCP, tool
+from fastmcp import FastMCP
 
 ICLOUD_ROOT = Path.home()/ "Library/Mobile Documents/com~apple~CloudDocs"
 mcp = FastMCP("iCloudDrive")
@@ -12,11 +12,11 @@ def _p(rel:str)->Path:
         raise ValueError("path outside iCloud")
     return p
 
-@tool()
+@mcp.tool()
 def list_files(path:str="") -> list[str]:
     return os.listdir(_p(path))
 
-@tool()
+@mcp.tool()
 def search_files(query:str, path:str="") -> list[str]:
     hits=[]
     for root,_,files in os.walk(_p(path)):
@@ -24,11 +24,11 @@ def search_files(query:str, path:str="") -> list[str]:
         if len(hits)>100: break
     return hits
 
-@tool()
+@mcp.tool()
 def copy_file(src_rel:str, dest_rel:str) -> str:
     shutil.copy2(_p(src_rel), _p(dest_rel)); return "copied"
 
-@tool()
+@mcp.tool()
 def delete_file(rel_path:str)->str:
     p=_p(rel_path); p.unlink(); return "deleted"
 

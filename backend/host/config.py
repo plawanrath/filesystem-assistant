@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     nas_host: str | None = None
     nas_user: str | None = None
     nas_pass: str | None = None
+    nas_port: str | None = None
 
     # derived paths
     @property

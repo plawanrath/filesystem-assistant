@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import os, io, json, pathlib
 from pathlib import Path
-from fastmcp import FastMCP, tool
+from fastmcp import FastMCP
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build, MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from google.auth.transport.requests import Request  
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 HOME = Path.home()/".filesystem_assistant"
@@ -28,30 +30,30 @@ def _creds():
 service = build("drive","v3",credentials=_creds(),cache_discovery=False)
 mcp = FastMCP("GoogleDrive")
 
-@tool()
+@mcp.tool()
 def list_files(folder_id:str="root") -> list[dict]:
     """List name,id,mimeType in a folder."""
     q=f"'{folder_id}' in parents and trashed=false"
     res=service.files().list(q=q,fields="files(id,name,mimeType)").execute()
     return res["files"]
 
-@tool()
+@mcp.tool()
 def search_files(query:str) -> list[dict]:
     res=service.files().list(q=f"name contains '{query}' and trashed=false",
                              fields="files(id,name,mimeType)").execute()
     return res["files"]
 
-@tool()
+@mcp.tool()
 def rename_file(file_id:str,new_name:str)->str:
     service.files().update(fileId=file_id,body={"name":new_name}).execute()
     return "renamed"
 
-@tool()
+@mcp.tool()
 def delete_file(file_id:str)->str:
     service.files().delete(fileId=file_id).execute()
     return "deleted"
 
-@tool()
+@mcp.tool()
 def download_file(file_id:str)->str:
     """Download to temp dir; return local path."""
     request=service.files().get_media(fileId=file_id)
@@ -64,7 +66,7 @@ def download_file(file_id:str)->str:
             _,done=downloader.next_chunk()
     return path
 
-@tool()
+@mcp.tool()
 def upload_file(local_path:str, dest_folder_id:str="root")->str:
     file_metadata={"name":Path(local_path).name,"parents":[dest_folder_id]}
     media=MediaFileUpload(local_path, resumable=True)

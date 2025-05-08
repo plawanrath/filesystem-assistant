@@ -1,2 +1,9 @@
 .env
 .venv/*
+backend/auth/credentials.json
+backend/.DS_Store
+.gitignore
+.DS_Store
+backend/tools/__pycache__/*
+.gitignore
+backend/host/__pycache__/*
