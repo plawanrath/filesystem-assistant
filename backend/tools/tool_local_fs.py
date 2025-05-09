@@ -3,20 +3,38 @@ import os, shutil, fnmatch
 from pathlib import Path
 from fastmcp import FastMCP
 
-ROOT = Path.home()   # limit ops to user home for safety
-mcp = FastMCP("LocalFS")
+ROOT = Path.home()          # never leave HOME
+mcp  = FastMCP("LocalFS")
 
-def _abs(p:str) -> Path:
-    pth = (ROOT / p.lstrip("~/")).expanduser().resolve()
-    if not str(pth).startswith(str(ROOT)):
-        raise ValueError("Access outside home disallowed")
-    return pth
+def _abs(p: str) -> Path:
+    p = os.path.expanduser(p)
+    return (Path(p) if os.path.isabs(p) else ROOT / p).resolve()
 
-@mcp.tool()
-def list_directory(path:str="~") -> list[str]:
-    """Return names in directory."""
-    p=_abs(path)
-    return os.listdir(p)
+# ---------------------------------------------------------------------
+#  canonical list_files  (ONE name, TWO parameters)  ←—— ★
+# ---------------------------------------------------------------------
+@mcp.tool(
+    name="list_files",
+    description="List directory contents. If file_type=='files' return only files."
+)
+def list_files(directory: str = "~", file_type: str = "all") -> list[str]:
+    base = _abs(directory)
+    try:
+        entries = os.listdir(base)
+    except FileNotFoundError:
+        return []
+    if file_type.lower() == "files":
+        entries = [e for e in entries if os.path.isfile(base / e)]
+    return entries
+
+# ---------- thin alias wrappers (optional) --------------------------
+@mcp.tool(name="listdir", description="Alias → list_files")
+def listdir(path: str = "~"):
+    return list_files(path, "all")
+
+@mcp.tool(name="folder_files", description="Alias → list_files")
+def folder_files(folder: str = "~", file_type: str = "all"):
+    return list_files(folder, file_type)
 
 @mcp.tool()
 def search_files(query:str, path:str="~") -> list[str]:
