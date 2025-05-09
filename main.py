@@ -67,7 +67,25 @@ async def start_servers():
 
             # cache
             sessions[name] = sess
-            toolschema.extend(await sess.list_tools())
+            tools = await sess.list_tools()
+
+            for item in tools:
+                if isinstance(item, dict):
+                    toolschema.append(item)
+
+                elif hasattr(item, "model_dump"):          # dataclass Tool  (fastmcp ≥2)
+                    toolschema.append(item.model_dump())
+
+                elif (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and isinstance(item[1], dict)          # ← only keep if schema is dict
+                ):
+                    toolschema.append(item[1])             # take the schema half
+                else:
+                    # silently ignore housekeeping entries like ('meta', None)
+                    continue
+            # toolschema.extend(t.model_dump() for t in await sess.list_tools())
     except Exception:
         # if any tool fails during startup, close whatever is open
         await exit_stack.aclose()
@@ -79,42 +97,85 @@ async def start_servers():
 #  3.  ASSISTANT — uses pre-built sessions & tool schema (no event-loop abuse)
 # --------------------------------------------------------------------------------------
 class Assistant:
+    """Execute MCP tools on behalf of GPT; return final answer."""
+
+    MAX_STEPS = 5  # prevent runaway loops
+
     def __init__(self, sessions: dict[str, ClientSession], schema: list[dict]):
         self.sessions = sessions
-        self.schema   = schema
+        self.schema   = schema              # OpenAI-json tool specs
         self.ai       = AsyncOpenAI(api_key=settings.openai_api_key)
-        self.history  = []
+        self.history  = [
+            {"role": "system",
+             "content": "You are a file assistant."}
+        ]
 
-    async def handle(self, prompt: str) -> str:
-        self.history.append({"role": "user", "content": prompt})
+    # ---------- helper ---------------------------------------------------
+    @staticmethod
+    def _tool_name(obj):
+        if isinstance(obj, dict):
+            return obj.get("name")
+        if isinstance(obj, tuple) and len(obj) == 2 and isinstance(obj[1], dict):
+            return obj[1].get("name")
+        return None
 
-        while True:
+    # ---------- main -----------------------------------------------------
+    async def handle(self, user_prompt: str) -> str:
+        self.history.append({"role": "user", "content": user_prompt})
+
+        for _ in range(self.MAX_STEPS):
+            # ---- call the model ----------------------------------------
             resp = await self.ai.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "system",
-                           "content": "You are a file assistant."}] + self.history,
+                messages=self.history,
                 tools=self.schema,
                 tool_choice="auto",
             )
             msg = resp.choices[0].message
+            print("🔹 raw model message →", msg)
 
-            if msg.tool_call:
-                tool_name = msg.tool_call.name
-                args      = json.loads(msg.tool_call.arguments)
+            # Append the assistant's message itself (with tool_calls or content)
+            self.history.append(msg.model_dump(exclude_none=True))
 
-                # find the session that offers this tool
-                for sess in self.sessions.values():
-                    if any(t["name"] == tool_name for t in await sess.list_tools()):
-                        result = await sess.call_tool(tool_name, args)
-                        self.history.append({"role": "tool",
-                                             "name": tool_name,
-                                             "content": json.dumps(result)})
-                        break
-                continue  # LLM decides next step
-            # final answer
-            answer = msg.content
-            self.history.append({"role": "assistant", "content": answer})
-            return answer
+            # ---- gather tool calls -------------------------------------
+            tool_calls = []
+            if getattr(msg, "tool_call", None):          # old field (≤1.21)
+                tool_calls = [msg.tool_call]
+            elif getattr(msg, "tool_calls", None):       # new field (≥1.22)
+                tool_calls = msg.tool_calls
+
+            # ---- execute each tool -------------------------------------
+            if tool_calls:
+                for call in tool_calls:
+                    name = call.function.name
+                    args = json.loads(call.function.arguments or "{}")
+
+                    # find session that owns this tool
+                    for sess in self.sessions.values():
+                        if any(self._tool_name(t) == name
+                               for t in await sess.list_tools()):
+                            result = await sess.call_tool(name, args)
+                            break
+                    else:
+                        result = f"(error: tool '{name}' not found)"
+
+                    # append tool result (must directly follow tool_calls message)
+                    self.history.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(result)
+                    })
+                # loop again so model can use the results
+                continue
+
+            # ---- final text answer -------------------------------------
+            if msg.content:
+                return msg.content
+
+            # neither tool_call nor content -> give up
+            break
+
+        return "(Sorry, I couldn’t complete that request.)"
 
 # --------------------------------------------------------------------------------------
 #  4.  SIMPLE QT CHAT WINDOW
