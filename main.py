@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from dataclasses import is_dataclass, asdict
 import sys, os, json, asyncio
 from pathlib import Path
 from contextlib import AsyncExitStack
@@ -50,59 +51,75 @@ else:
 # 2 - START ALL TOOL SERVERS  (returns sessions, toolschema, exit_stack)
 # --------------------------------------------------------------------------------------
 async def start_servers():
+    """
+    Launch each MCP tool server, collect their raw schemas (with
+    name, description, parameters), and keep them alive via exit_stack.
+    Returns: (sessions: dict[str,ClientSession],
+              tool_schemas: list[dict],
+              exit_stack: AsyncExitStack)
+    """
     sessions: dict[str, ClientSession] = {}
-    toolschema: list[dict] = []
-    exit_stack = AsyncExitStack()
+    tool_schemas: list[dict]          = []
+    exit_stack                        = AsyncExitStack()
 
     try:
         for tag, cmd in SERVER_CMDS.items():
-            # 1) Configure and spawn the MCP server subprocess
+            # 1) spawn the MCP subprocess over stdio
             params = StdioServerParameters(
                 command=cmd[0],
                 args=cmd[1:],
                 env=os.environ.copy(),
                 cwd=str(Path(__file__).resolve().parent),
             )
-            r, w = await exit_stack.enter_async_context(stdio_client(params))
+            reader, writer = await exit_stack.enter_async_context(
+                stdio_client(params)
+            )
 
-            # 2) Establish the MCP session handshake
-            sess = await exit_stack.enter_async_context(ClientSession(r, w))
+            # 2) handshake → ClientSession
+            sess = await exit_stack.enter_async_context(
+                ClientSession(reader, writer)
+            )
             await sess.initialize()
             sessions[tag] = sess
 
-            # ---- STEP 1: grab the raw list_tools() response -------------
+            # 3) pull the raw list_tools() response
             raw = await sess.list_tools()
 
-            # ---- STEP 2: extract the actual Tool objects list -----------
-            tool_objs: list = []
-            for key, val in raw:                       # raw is List[tuple]
+            # 4) find the ("tools", [...]) tuple and extract list
+            tool_list = []
+            for key, val in raw:
                 if key == "tools" and isinstance(val, list):
-                    tool_objs = val                     # val is List[Tool]
+                    tool_list = val
                     break
 
-            # ---- STEP 3: loop through each Tool instance --------------
-            for tool in tool_objs:
-                # `tool` is a fastmcp.tools.Tool (Pydantic model)
-                if hasattr(tool, "model_dump"):
-                    schema = tool.model_dump(exclude_none=True)
-                else:
-                    schema = tool.dict()               # fallback
-                schema["name"] = tool.name             # ensure name is present
-                toolschema.append(schema)
+            # 5) for each Tool instance produce a raw schema dict
+            for tool in tool_list:
+                # FastMCP’s Tool is a Pydantic model
+                schema = (
+                    tool.model_dump(exclude_none=True)
+                    if hasattr(tool, "model_dump")
+                    else tool.dict()
+                )
+                # ensure we rename MCP’s `inputSchema` → OpenAI’s `parameters`
+                if "inputSchema" in schema:
+                    schema["parameters"] = schema.pop("inputSchema")
+                # inject name + description
+                schema["name"]        = tool.name
+                schema["description"] = schema.get("description", "")
+                tool_schemas.append(schema)
 
     except Exception:
-        # on any startup failure, clean up whatever was opened
+        # clean up on error
         await exit_stack.aclose()
         raise
 
-    # ------------------------------------------------------------------
-    # Debug print: what will the LLM actually see?
-    print("\n=== Tools visible to the model ===")
-    for t in toolschema:
-        print(" •", t.get("name"))
+    # debug: show the raw schemas you will wrap later
+    print("\n=== Raw tool schemas collected ===")
+    for s in tool_schemas:
+        print(" •", s["name"])
     print("===================================\n")
 
-    return sessions, toolschema, exit_stack
+    return sessions, tool_schemas, exit_stack
 
 # --------------------------------------------------------------------------------------
 # 3 - ASSISTANT (handles GPT ↔ MCP tools)
@@ -156,24 +173,84 @@ class Assistant:
         return None
 
     async def _find_session(self, tool_name: str) -> ClientSession | None:
+        """
+        Return the first ClientSession whose MCP server registered `tool_name`.
+        """
         for tag, sess in self.sessions.items():
-            tools = await sess.list_tools()
-            tool_names = [self._tool_name(t) for t in tools]
-            print(f"[DEBUG] {tag} provides →", tool_names)  # ← add
-            if tool_name in tool_names:
+            # 1) fetch the raw list_tools() response
+            raw = await sess.list_tools()
+
+            # 2) extract the list of Tool objects from the ("tools", [...]) tuple
+            tool_objs: list = []
+            for key, val in raw:
+                if key == "tools" and isinstance(val, list):
+                    tool_objs = val
+                    break
+
+            # 3) build a list of names for debugging & comparison
+            available = []
+            for tool in tool_objs:
+                # fastmcp.tools.Tool has a `.name` attr
+                if hasattr(tool, "name"):
+                    available.append(tool.name)
+                # fallback in case a dict ever sneaks in
+                elif isinstance(tool, dict) and "name" in tool:
+                    available.append(tool["name"])
+
+            print(f"[DEBUG] {tag} provides →", available)
+
+            # 4) if our desired tool_name is here, return this session
+            if tool_name in available:
                 return sess
-        print("[DEBUG] no session exposes", tool_name)      # ← add
+
+        # nothing matched
+        print("[DEBUG] no session exposes", tool_name)
         return None
 
     # ---------- main -----------------------------------------------------
+    def wrap_tool_schemas(self, raw_schemas: list[dict]) -> list[dict]:
+        """
+        Given a list of raw tool schemas (each containing at least
+        'name', 'description', and either 'parameters' or 'inputSchema'),
+        return a list formatted for OpenAI Chat Completions API:
+        [
+            {
+            "type": "function",
+            "function": {
+                "name": ...,
+                "description": ...,
+                "parameters": { ... }
+            }
+            },
+            ...
+        ]
+        """
+        wrapped: list[dict] = []
+        for schema in raw_schemas:
+            # pick the JSON schema under either key
+            params = schema.get("parameters", schema.get("inputSchema", {}))
+            wrapped.append({
+                "type": "function",
+                "function": {
+                    "name":        schema["name"],
+                    "description": schema.get("description", ""),
+                    "parameters":  params,
+                }
+            })
+        return wrapped
+
+
     async def handle(self, user_prompt: str) -> str:
         self.history.append({"role": "user", "content": user_prompt})
 
         for step in range(self.MAX_STEPS):
+            # wrap_tool_schemas(...) from earlier
+            callable_tools = self.wrap_tool_schemas(self.tools)
+
             resp = await self.ai.chat.completions.create(
                 model="gpt-4o",
                 messages=self.history,
-                tools=self.tools,
+                tools=callable_tools,
                 tool_choice="auto",
             )
             msg = resp.choices[0].message
@@ -189,50 +266,35 @@ class Assistant:
                 for call in calls:
                     tool_name = call.function.name
                     args = json.loads(call.function.arguments or "{}")
-                    # ----- parameter-alias normalisation -----------------------------
-                    alias = (
-                        args.pop("folder", None)
-                        or args.pop("folder_path", None)
-                        or args.pop("path", None)
-                    )
-                    if alias and "directory" not in args:
-                        args["directory"] = alias
-                    if "fileType" in args and "file_type" not in args:
-                        args["file_type"] = args.pop("fileType")
-                    # ---------- alias normalisation  ----------------------------------
-                    # if "folder" in args and "directory" not in args:
-                    #     args["directory"] = args.pop("folder")
-                    # if "folder_path" in args and "directory" not in args:
-                    #     args["directory"] = args.pop("folder_path")
-                    # if "path" in args and "directory" not in args:
-                    #     args["directory"] = args.pop("path")
-                    # if "fileType" in args and "file_type" not in args:
-                    #     args["file_type"] = args.pop("fileType")
+                    # … your alias normalization …
 
                     sess = await self._find_session(tool_name)
                     if not sess:
-                        result = f"(error: tool '{tool_name}' not found)"
+                        result_data = {"error": f"tool '{tool_name}' not found"}
                     else:
-                        try:
-                            result = await sess.call_tool(tool_name, args)
-                        except Exception as e:
-                            result = f"(tool execution error: {e})"
+                        raw = await sess.call_tool(tool_name, args)
+                        # ─── Convert raw result to pure Python ──────────────
+                        if hasattr(raw, "model_dump"):
+                            result_data = raw.model_dump(exclude_none=True)
+                        elif hasattr(raw, "dict"):
+                            result_data = raw.dict()
+                        elif is_dataclass(raw):
+                            result_data = asdict(raw)
+                        else:
+                            result_data = raw
+                    # ─── Now it’s safe to JSON‐serialize ───────────────────
+                    self.history.append({
+                        "role":         "tool",
+                        "tool_call_id": call.id,
+                        "content":      json.dumps(result_data),
+                    })
 
-                    self.history.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": json.dumps(result),
-                        }
-                    )
-
-                continue  # ask GPT again with results
+                continue  # feed GPT the updated history
 
             if msg.content:
                 return msg.content
 
         return "⚠️  Sorry, I couldn’t complete that request."
-
 
 # --------------------------------------------------------------------------------------
 # 4 - SIMPLE QT CHAT WINDOW
