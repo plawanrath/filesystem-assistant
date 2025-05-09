@@ -12,6 +12,7 @@ from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI
 from qasync import QEventLoop, asyncSlot
 from synology_api import filestation
+from PyQt6 import QtGui, QtWidgets
 
 from backend.host.config import settings
 
@@ -314,9 +315,12 @@ class ChatWindow(QtWidgets.QWidget):
         lay.addWidget(self.out)
         lay.addWidget(self.inp)
 
-    def _append(self, who, text):
+    # ---------- helpers -------------------------------------------------
+    def _append(self, who: str, text: str):
+        """Append rich-text line to the chat box."""
         self.out.append(f"<b>{who}:</b> {text}")
 
+    # ---------- Qt slots ------------------------------------------------
     def _submit(self):
         text = self.inp.text().strip()
         if not text:
@@ -325,10 +329,28 @@ class ChatWindow(QtWidgets.QWidget):
         self._append("You", text)
         asyncio.create_task(self._answer(text))
 
-    async def _answer(self, q):
-        a = await self.assistant.handle(q)
-        self._append("Assistant", a)
+    async def _answer(self, q: str):
+        """
+        Show a “Thinking …” placeholder, await the LLM, then
+        replace that placeholder with the final answer.
+        """
+        # 1) append placeholder and remember its block position
+        self.out.append("<i>Assistant is thinking …</i>")
+        placeholder_block = self.out.document().lastBlock()
 
+        # 2) run the LLM/tool orchestration
+        answer_text = await self.assistant.handle(q)
+
+        # 3) replace the placeholder with the real answer
+        cursor = QtGui.QTextCursor(placeholder_block)
+        cursor.select(QtGui.QTextCursor.SelectionType.BlockUnderCursor)
+        cursor.removeSelectedText()            # delete “Thinking …”
+        cursor.deletePreviousChar()            # remove the leftover newline
+
+        # move to the very end and insert Assistant bubble on its own line
+        self.out.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+        self._append("Assistant", answer_text)
+        self.out.append("")
 
 # --------------------------------------------------------------------------------------
 # 5 - MAIN (Qt + asyncio via qasync)

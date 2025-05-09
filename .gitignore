@@ -7,3 +7,5 @@ backend/.DS_Store
 backend/tools/__pycache__/*
 .gitignore
 backend/host/__pycache__/*
+dist/*
+build/*

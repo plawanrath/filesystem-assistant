@@ -27,3 +27,16 @@ NAS_PASS=
 python main.py
 ```
 This should start a GUI.
+
+# Building MacOS App
+
+1. Make sure you have a setup.py file
+```
+python setup.py py2app
+```
+
+## To Debug App
+
+```
+/Applications/Filesystem\ Assistant.app/Contents/MacOS/Filesystem\ Assistant --verbose
+```
