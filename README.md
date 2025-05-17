@@ -40,3 +40,4 @@ python setup.py py2app
 ```
 /Applications/Filesystem\ Assistant.app/Contents/MacOS/Filesystem\ Assistant --verbose
 ```
+
